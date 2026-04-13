@@ -1,0 +1,39 @@
+# === Credentials & Tokens (CRITICAL - never commit) ===
+credentials.json
+token.json
+gmail_credentials.json
+gmail_token.json
+*.p12
+*.pem
+client_secret*.json
+
+# === Streamlit Secrets ===
+.streamlit/secrets.toml
+
+# === Generated Files ===
+generated_invoices/
+backups/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+.venv/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === SQLite (local dev only) ===
+*.db
+*.sqlite3
