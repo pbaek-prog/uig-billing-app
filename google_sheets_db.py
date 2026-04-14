@@ -1003,6 +1003,16 @@ def get_monthly_pnl(year, month):
     income = sum(p["amount"] for p in month_payments)
     expense_total = sum(e["amount"] for e in month_expenses)
 
+    # Expense breakdown by category
+    cat_totals = {}
+    for e in month_expenses:
+        cat = e.get("category") or "Uncategorized"
+        cat_totals[cat] = cat_totals.get(cat, 0) + e.get("amount", 0)
+    expense_breakdown = [
+        {"category": k, "total": round(v, 2)}
+        for k, v in sorted(cat_totals.items(), key=lambda x: -x[1])
+    ]
+
     return {
         "year": year,
         "month": month,
@@ -1011,7 +1021,9 @@ def get_monthly_pnl(year, month):
         "expenses": round(expense_total, 2),
         "net": round(income - expense_total, 2),
         "payments": month_payments,
+        "payment_details": month_payments,
         "expense_items": month_expenses,
+        "expense_breakdown": expense_breakdown,
     }
 
 
