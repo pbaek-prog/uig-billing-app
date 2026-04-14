@@ -53,23 +53,43 @@ def get_gmail_service():
 
 
 def is_gmail_api_configured():
-    return GMAIL_API_AVAILABLE and os.path.exists(CREDENTIALS_PATH)
+    if GMAIL_API_AVAILABLE and os.path.exists(CREDENTIALS_PATH):
+        return True
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "google_credentials" in st.secrets:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def is_gmail_api_authorized():
-    if not GMAIL_API_AVAILABLE or not os.path.exists(TOKEN_PATH):
-        return False
+    # Try local token file
+    if GMAIL_API_AVAILABLE and os.path.exists(TOKEN_PATH):
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_PATH, GMAIL_SCOPES)
+            if creds and creds.valid:
+                return True
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(TOKEN_PATH, 'w') as f:
+                    f.write(creds.to_json())
+                return True
+        except Exception:
+            pass
+    # Try Streamlit Cloud secrets
     try:
-        creds = Credentials.from_authorized_user_file(TOKEN_PATH, GMAIL_SCOPES)
-        if creds and creds.valid:
-            return True
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            with open(TOKEN_PATH, 'w') as f:
-                f.write(creds.to_json())
-            return True
+        import streamlit as st
+        if hasattr(st, "secrets") and "google_credentials" in st.secrets:
+            import json
+            token_data = st.secrets["google_credentials"].get("token_json", "")
+            if token_data:
+                token_info = json.loads(token_data)
+                if token_info.get("refresh_token"):
+                    return True
     except Exception:
-        return False
+        pass
     return False
 
 

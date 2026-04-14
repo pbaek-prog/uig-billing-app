@@ -119,8 +119,16 @@ def get_drive_service():
 
 
 def is_sheets_configured():
-    """Check if Google Sheets credentials are available."""
-    return os.path.exists(CREDENTIALS_FILE)
+    """Check if Google Sheets credentials are available (local file OR Streamlit Cloud secrets)."""
+    if os.path.exists(CREDENTIALS_FILE):
+        return True
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "google_credentials" in st.secrets:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def is_sheets_authorized():
