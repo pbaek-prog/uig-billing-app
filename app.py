@@ -2097,9 +2097,16 @@ elif page.startswith("🌐"):  # Client Portal
 
             clients = get_all_clients()
             if clients:
-                client_opts = {f"{c['name']} ({c['case_number'] or '-'})": c for c in clients}
+                # Use index to guarantee unique dropdown keys (names can repeat)
+                client_opts = {
+                    f"{c['name']} ({c.get('case_number') or '-'}) [#{idx+1}]": c
+                    for idx, c in enumerate(clients)
+                }
                 sel_key = st.selectbox("Select Client", list(client_opts.keys()), key="portal_client")
-                sel_c = client_opts[sel_key]
+                sel_c = client_opts.get(sel_key)
+                if sel_c is None:
+                    st.warning("Please select a client.")
+                    st.stop()
 
                 portal_email = st.text_input("Client Email", value=sel_c.get("email", ""), key="portal_email")
 
