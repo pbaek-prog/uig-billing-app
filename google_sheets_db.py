@@ -203,7 +203,7 @@ def _read_sheet(sheet_name, service=None, force_refresh=False):
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"{sheet_name}\!A1:ZZ"
+            range=f"{sheet_name}!A1:ZZ"
         ).execute()
         values = result.get("values", [])
         if len(values) < 1:
