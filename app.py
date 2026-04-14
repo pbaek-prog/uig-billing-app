@@ -73,7 +73,10 @@ from gmail_api_service import (
     is_gmail_api_configured, is_gmail_api_authorized,
     create_gmail_draft, authorize_gmail
 )
-from config import FIRM_NAME, FIRM_ADDRESS, FIRM_CITY_STATE, FIRM_PHONE, FIRM_EMAIL, SPREADSHEET_ID
+from config import (
+    FIRM_NAME, FIRM_ADDRESS, FIRM_CITY_STATE, FIRM_PHONE, FIRM_EMAIL,
+    SPREADSHEET_ID, DRIVE_CLIENTS_FOLDER_ID,
+)
 
 # --- New modules: USCIS, PACER, Client Portal ---
 try:
@@ -331,34 +334,282 @@ if not check_password():
 if st.session_state.get("portal_authenticated") and st.session_state.get("portal_client"):
     _portal_client = st.session_state.portal_client
     _portal_lang = _portal_client.get("language", "en")
+    _client_id = _portal_client.get("client_id", "")
+    _client_name = _portal_client.get("client_name", "Client")
 
     st.markdown(f"""
     <div class="gold-banner">
         <h2 style="margin:0;">🌐 Client Portal</h2>
-        <p style="margin:5px 0 0;">Welcome, {_portal_client.get('client_name', 'Client')}</p>
+        <p style="margin:5px 0 0;">Welcome, {_client_name}</p>
     </div>
     """, unsafe_allow_html=True)
 
+    st.sidebar.markdown("## 🌐 Client Portal")
+    st.sidebar.markdown(f"**{_client_name}**")
     if st.sidebar.button("🚪 Logout", use_container_width=True):
         st.session_state.portal_authenticated = False
         st.session_state.portal_client = None
         st.session_state.authenticated = False
         st.rerun()
 
-    _client_id = _portal_client.get("client_id", "")
-
+    # --- Initialize services ---
     try:
         from google_sheets_db import get_credentials
         from googleapiclient.discovery import build
         _creds = get_credentials()
         _sheets_svc = build('sheets', 'v4', credentials=_creds) if _creds else None
+        _drive_svc = build('drive', 'v3', credentials=_creds) if _creds else None
     except Exception:
+        _creds = None
         _sheets_svc = None
+        _drive_svc = None
 
-    portal_tab1, portal_tab2, portal_tab3 = st.tabs(["📄 Invoices", "💰 Payments", "📅 Deadlines"])
+    from client_portal import (
+        get_client_invoices, get_client_payments, get_client_deadlines,
+        get_or_create_client_folder, upload_client_document,
+        get_client_uploaded_files, save_client_intake,
+        translate_to_english, detect_language, send_submission_notification,
+    )
 
+    portal_tab1, portal_tab2, portal_tab3, portal_tab4, portal_tab5 = st.tabs([
+        "📋 Case Info", "📤 Upload Documents", "📄 Invoices", "💰 Payments", "📅 Deadlines"
+    ])
+
+    # ============================
+    # TAB 1: CASE INTAKE FORM
+    # ============================
     with portal_tab1:
-        st.subheader("Your Invoices")
+        st.subheader("📋 Your Case Information")
+        st.markdown("Please fill in your information as completely as possible. "
+                    "You may write in **any language** — we will translate automatically.")
+
+        with st.form("case_intake_form", clear_on_submit=False):
+            st.markdown("#### Personal Information")
+            pi_col1, pi_col2 = st.columns(2)
+            with pi_col1:
+                intake_fullname = st.text_input("Full Legal Name *", placeholder="e.g. Juan Carlos Garcia Lopez")
+                intake_dob = st.text_input("Date of Birth", placeholder="MM/DD/YYYY")
+                intake_nationality = st.text_input("Nationality / Country of Birth", placeholder="e.g. Mexico")
+            with pi_col2:
+                intake_phone = st.text_input("Phone Number *", placeholder="e.g. (847) 555-1234")
+                intake_email = st.text_input("Email Address *", placeholder="e.g. you@email.com")
+                intake_address = st.text_input("Current Address", placeholder="Street, City, State, ZIP")
+
+            st.markdown("---")
+            st.markdown("#### Immigration / Case Details")
+            ic_col1, ic_col2 = st.columns(2)
+            with ic_col1:
+                intake_status = st.selectbox("Current Immigration Status", [
+                    "Select...", "U.S. Citizen", "Lawful Permanent Resident (Green Card)",
+                    "H-1B Visa", "H-4 Visa", "L-1 Visa", "O-1 Visa",
+                    "F-1 Student Visa", "J-1 Exchange Visitor", "B-1/B-2 Visitor",
+                    "TPS", "DACA", "Asylum Pending", "Undocumented",
+                    "Other (describe below)"
+                ])
+            with ic_col2:
+                intake_case_type = st.selectbox("Type of Case / Service Needed", [
+                    "Select...", "Family-Based Green Card", "Employment-Based Green Card",
+                    "Naturalization / Citizenship", "H-1B Petition",
+                    "L-1 Intracompany Transfer", "O-1 Extraordinary Ability",
+                    "Asylum Application", "VAWA Petition", "U Visa",
+                    "T Visa", "DACA Renewal", "TPS Application/Renewal",
+                    "Removal / Deportation Defense", "Bond Hearing",
+                    "Consular Processing", "Waiver (I-601 / I-212 / I-601A)",
+                    "EB-5 Investor", "Other (describe below)"
+                ])
+
+            st.markdown("---")
+            st.markdown("#### Describe Your Case")
+            st.caption("✍️ You can write in any language (Korean, Spanish, Chinese, etc.) — "
+                      "your description will be automatically translated to English for our team.")
+            intake_description = st.text_area(
+                "Please describe your situation in detail *",
+                height=200,
+                placeholder="Describe your immigration situation, what you need help with, "
+                           "any deadlines you're aware of, previous cases or petitions filed, etc.\n\n"
+                           "어떤 언어로든 작성하세요 / Escriba en cualquier idioma / 用任何语言写"
+            )
+            intake_notes = st.text_area(
+                "Additional Notes (optional)",
+                height=100,
+                placeholder="Any other information you'd like us to know..."
+            )
+
+            submitted = st.form_submit_button("📨 Submit Case Information", use_container_width=True, type="primary")
+
+        if submitted:
+            if not intake_fullname or not intake_phone or not intake_description:
+                st.error("Please fill in all required fields (*)")
+            else:
+                with st.spinner("Processing your submission..."):
+                    # --- Auto-translate ---
+                    desc_lang = detect_language(intake_description)
+                    if desc_lang != "en":
+                        translated_desc, detected = translate_to_english(intake_description, _creds)
+                        st.info(f"🌐 Auto-translated from **{detected}** to English")
+                    else:
+                        translated_desc = intake_description
+                        detected = "en"
+
+                    notes_translated = intake_notes
+                    if intake_notes and detect_language(intake_notes) != "en":
+                        notes_translated, _ = translate_to_english(intake_notes, _creds)
+
+                    # --- Create/get client folder on Drive ---
+                    folder_link = ""
+                    if _drive_svc:
+                        client_folder_id = get_or_create_client_folder(
+                            _drive_svc, _client_name, _client_id, DRIVE_CLIENTS_FOLDER_ID
+                        )
+                        if client_folder_id:
+                            folder_link = f"https://drive.google.com/drive/folders/{client_folder_id}"
+
+                    # --- Save to Google Sheets ---
+                    intake_data = {
+                        "client_id": _client_id,
+                        "client_name": _client_name,
+                        "full_name": intake_fullname,
+                        "date_of_birth": intake_dob,
+                        "nationality": intake_nationality,
+                        "phone": intake_phone,
+                        "email": intake_email,
+                        "current_address": intake_address,
+                        "immigration_status": intake_status if intake_status != "Select..." else "",
+                        "case_type": intake_case_type if intake_case_type != "Select..." else "",
+                        "case_description_original": intake_description,
+                        "original_language": detected,
+                        "case_description_english": translated_desc,
+                        "additional_notes": notes_translated,
+                        "documents_uploaded": "0",
+                        "drive_folder_link": folder_link,
+                    }
+
+                    submission_id = save_client_intake(_sheets_svc, SPREADSHEET_ID, intake_data)
+
+                    # --- Send email notification ---
+                    if _creds and submission_id:
+                        summary = {
+                            "Full Name": intake_fullname,
+                            "Phone": intake_phone,
+                            "Email": intake_email,
+                            "Nationality": intake_nationality,
+                            "Immigration Status": intake_status if intake_status != "Select..." else "N/A",
+                            "Case Type": intake_case_type if intake_case_type != "Select..." else "N/A",
+                            "Case Description (English)": translated_desc[:500] + ("..." if len(translated_desc) > 500 else ""),
+                            "Original Language": detected,
+                        }
+                        send_submission_notification(
+                            _creds, _client_name, submission_id,
+                            summary, folder_link=folder_link,
+                            notify_email="info@usimmigrationgroup.org"
+                        )
+
+                if submission_id:
+                    st.success(f"✅ Your information has been submitted successfully! (Ref: {submission_id})")
+                    st.info("Our team has been notified and will review your case. "
+                           "You may also upload supporting documents in the **Upload Documents** tab.")
+                else:
+                    st.error("There was an issue saving your information. Please try again or contact our office.")
+
+    # ============================
+    # TAB 2: DOCUMENT UPLOAD
+    # ============================
+    with portal_tab2:
+        st.subheader("📤 Upload Documents")
+        st.markdown("Upload your supporting documents (passport, I-94, visa, forms, letters, etc.)")
+        st.caption("Accepted formats: PDF, JPG, PNG, DOCX, XLSX, TXT — Max 200MB per file")
+
+        uploaded_files = st.file_uploader(
+            "Choose files to upload",
+            type=["pdf", "jpg", "jpeg", "png", "docx", "xlsx", "txt", "doc", "csv"],
+            accept_multiple_files=True,
+            key="portal_file_upload"
+        )
+
+        if uploaded_files:
+            if st.button("📤 Upload All Files", use_container_width=True, type="primary"):
+                if _drive_svc:
+                    client_folder_id = get_or_create_client_folder(
+                        _drive_svc, _client_name, _client_id, DRIVE_CLIENTS_FOLDER_ID
+                    )
+                    if client_folder_id:
+                        upload_results = []
+                        progress_bar = st.progress(0)
+                        for idx, uf in enumerate(uploaded_files):
+                            with st.spinner(f"Uploading {uf.name}..."):
+                                result = upload_client_document(
+                                    _drive_svc,
+                                    uf.getvalue(),
+                                    uf.name,
+                                    uf.type or "application/octet-stream",
+                                    client_folder_id,
+                                    subfolder="Documents"
+                                )
+                                if result:
+                                    upload_results.append(result)
+                            progress_bar.progress((idx + 1) / len(uploaded_files))
+
+                        if upload_results:
+                            st.success(f"✅ {len(upload_results)} file(s) uploaded successfully!")
+
+                            # Notify firm via email
+                            if _creds:
+                                folder_link = f"https://drive.google.com/drive/folders/{client_folder_id}"
+                                send_submission_notification(
+                                    _creds, _client_name,
+                                    f"UPLOAD-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                                    {"Action": "Document Upload", "Files Uploaded": str(len(upload_results))},
+                                    file_links=upload_results,
+                                    folder_link=folder_link,
+                                    notify_email="info@usimmigrationgroup.org"
+                                )
+                                st.info("📧 Our team has been notified about your upload.")
+
+                            for r in upload_results:
+                                st.markdown(f"✅ **{r['file_name']}** — [View in Drive]({r['file_link']})")
+                        else:
+                            st.error("Failed to upload files. Please try again.")
+                    else:
+                        st.error("Could not create your folder. Please contact our office.")
+                else:
+                    st.error("Drive service not available. Please contact our office.")
+
+        # Show previously uploaded files
+        st.markdown("---")
+        st.subheader("📁 Your Uploaded Documents")
+        if _drive_svc:
+            try:
+                client_folder_id = get_or_create_client_folder(
+                    _drive_svc, _client_name, _client_id, DRIVE_CLIENTS_FOLDER_ID
+                )
+                if client_folder_id:
+                    existing_files = get_client_uploaded_files(_drive_svc, client_folder_id)
+                    if existing_files:
+                        for ef in existing_files:
+                            size_kb = int(ef.get('size', 0)) / 1024
+                            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+                            st.markdown(f"""
+                            <div style="background:#f8f9fa; padding:10px 15px; border-radius:8px; margin:5px 0;
+                                        border-left:3px solid #1A3C5E; display:flex; justify-content:space-between;">
+                                <div>
+                                    <strong>📄 {ef['name']}</strong><br>
+                                    <span style="color:#999; font-size:12px;">{ef.get('created', '')[:10]} | {size_str}</span>
+                                </div>
+                                <div><a href="{ef['link']}" target="_blank" style="color:#F5A623;">View ↗</a></div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.info("No documents uploaded yet.")
+            except Exception:
+                st.info("No documents uploaded yet.")
+        else:
+            st.warning("Document storage not available.")
+
+    # ============================
+    # TAB 3: INVOICES
+    # ============================
+    with portal_tab3:
+        st.subheader("📄 Your Invoices")
         invoices = get_client_invoices(_client_id, _sheets_svc, SPREADSHEET_ID) if _sheets_svc else []
         if invoices:
             for inv in invoices:
@@ -375,8 +626,11 @@ if st.session_state.get("portal_authenticated") and st.session_state.get("portal
         else:
             st.info("No invoices found.")
 
-    with portal_tab2:
-        st.subheader("Your Payments")
+    # ============================
+    # TAB 4: PAYMENTS
+    # ============================
+    with portal_tab4:
+        st.subheader("💰 Your Payments")
         payments = get_client_payments(_client_id, _sheets_svc, SPREADSHEET_ID) if _sheets_svc else []
         if payments:
             for pmt in payments:
@@ -390,8 +644,11 @@ if st.session_state.get("portal_authenticated") and st.session_state.get("portal
         else:
             st.info("No payments recorded.")
 
-    with portal_tab3:
-        st.subheader("Upcoming Deadlines")
+    # ============================
+    # TAB 5: DEADLINES
+    # ============================
+    with portal_tab5:
+        st.subheader("📅 Upcoming Deadlines")
         deadlines = get_client_deadlines(_client_id, _sheets_svc, SPREADSHEET_ID) if _sheets_svc else []
         if deadlines:
             for dl in deadlines:
@@ -407,7 +664,13 @@ if st.session_state.get("portal_authenticated") and st.session_state.get("portal
             st.info("No upcoming deadlines.")
 
     st.markdown("---")
-    st.caption("US Immigration Group | (847) 449-8660 | 800 E. Northwest Hwy. Ste 205, Mount Prospect, IL 60016")
+    st.markdown("""
+    <div style="text-align:center; color:#999; font-size:13px;">
+        <strong>US Immigration Group</strong><br>
+        (847) 449-8660 | 800 E. Northwest Hwy. Ste 205, Mount Prospect, IL 60016<br>
+        <em>This portal is for authorized clients only. Do not share your access code.</em>
+    </div>
+    """, unsafe_allow_html=True)
     st.stop()
 
 # --- Init (only once per session, not every page reload) ---
@@ -472,13 +735,13 @@ st.sidebar.divider()
 # Language selector
 if "app_lang" not in st.session_state:
     st.session_state.app_lang = "en"
-lang_col1, lang_col2 = st.sidebar.columns([3, 1])
-with lang_col2:
-    lang_options = list(LANGUAGE_NAMES.keys())
-    lang_labels = list(LANGUAGE_NAMES.values())
-    lang_idx = lang_options.index(st.session_state.app_lang) if st.session_state.app_lang in lang_options else 0
-    selected_lang = st.selectbox("🌐", lang_labels, index=lang_idx, key="lang_select", label_visibility="collapsed")
-    st.session_state.app_lang = lang_options[lang_labels.index(selected_lang)]
+lang_options = list(LANGUAGE_NAMES.keys())
+lang_labels = [f"🌐 {name}" for name in LANGUAGE_NAMES.values()]
+lang_idx = lang_options.index(st.session_state.app_lang) if st.session_state.app_lang in lang_options else 0
+selected_lang = st.sidebar.selectbox(
+    "Language / 언어", lang_labels, index=lang_idx, key="lang_select"
+)
+st.session_state.app_lang = lang_options[lang_labels.index(selected_lang)]
 
 _lang = st.session_state.app_lang
 
