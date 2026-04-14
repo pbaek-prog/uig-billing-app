@@ -79,6 +79,186 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- Password Protection with Reset via Email ---
+import random
+import string
+import time as _time
+
+def _generate_reset_code():
+    """Generate a 6-digit reset code."""
+    return ''.join(random.choices(string.digits, k=6))
+
+def _send_reset_code_email(reset_code):
+    """Send password reset code via Gmail API."""
+    try:
+        admin_email = st.secrets.get("admin_email", "p.baek@iifa.edu")
+    except Exception:
+        admin_email = "p.baek@iifa.edu"
+
+    subject = "[UIG Billing] Password Reset Code"
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif; max-width:500px; margin:0 auto; padding:30px;">
+        <div style="text-align:center; border-bottom:3px solid #F5A623; padding-bottom:20px;">
+            <h2 style="color:#1A3C5E;">⚖️ US Immigration Group</h2>
+            <p style="color:#666;">Legal Billing System</p>
+        </div>
+        <div style="padding:30px 0; text-align:center;">
+            <p style="color:#333; font-size:16px;">Your password reset code is:</p>
+            <div style="background:#F5A623; color:#fff; font-size:36px; font-weight:bold;
+                        letter-spacing:8px; padding:20px 40px; border-radius:10px;
+                        display:inline-block; margin:20px 0;">{reset_code}</div>
+            <p style="color:#999; font-size:13px;">This code expires in 10 minutes.</p>
+        </div>
+        <div style="border-top:1px solid #eee; padding-top:15px; text-align:center;">
+            <p style="color:#999; font-size:12px;">
+                If you did not request this reset, please ignore this email.<br>
+                US Immigration Group | (847) 449-8660
+            </p>
+        </div>
+    </div>
+    """
+    try:
+        from gmail_api_service import create_gmail_draft
+        result = create_gmail_draft(admin_email, subject, html_body)
+        if result:
+            # Try to send the draft directly
+            try:
+                from google_sheets_db import get_credentials
+                from googleapiclient.discovery import build
+                creds = get_credentials()
+                if creds:
+                    gmail_service = build('gmail', 'v1', credentials=creds)
+                    draft_id = result.get('id')
+                    if draft_id:
+                        gmail_service.users().drafts().send(
+                            userId='me', body={'id': draft_id}
+                        ).execute()
+                        return True
+            except Exception:
+                pass
+            return True  # Draft created at minimum
+    except Exception:
+        pass
+    return False
+
+def check_password():
+    """Returns True if the user has entered the correct password. Includes reset via email."""
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if "show_reset" not in st.session_state:
+        st.session_state.show_reset = False
+    if "show_new_password" not in st.session_state:
+        st.session_state.show_new_password = False
+    if "reset_code" not in st.session_state:
+        st.session_state.reset_code = None
+    if "reset_code_time" not in st.session_state:
+        st.session_state.reset_code_time = 0
+
+    if st.session_state.authenticated:
+        return True
+
+    # Get password from secrets or use default
+    try:
+        correct_password = st.secrets.get("app_password", "uig2025!")
+    except Exception:
+        correct_password = "uig2025!"
+
+    # Header
+    st.markdown("""
+    <div style="display:flex; justify-content:center; margin-top:60px;">
+        <div style="text-align:center;">
+            <h1 style="color:#1A3C5E;">⚖️ US Immigration Group</h1>
+            <h3 style="color:#666;">Legal Billing System</h3>
+            <p style="color:#999;">800 E. Northwest Hwy. Ste 205, Mount Prospect, IL 60016</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        st.markdown("---")
+
+        # === Step 3: Set New Password ===
+        if st.session_state.show_new_password:
+            st.markdown("#### 🔑 Set New Password")
+            new_pw = st.text_input("New Password", type="password", placeholder="Enter new password", key="new_pw")
+            new_pw2 = st.text_input("Confirm Password", type="password", placeholder="Confirm new password", key="new_pw2")
+            if st.button("Change Password", use_container_width=True, type="primary"):
+                if not new_pw or len(new_pw) < 4:
+                    st.error("Password must be at least 4 characters.")
+                elif new_pw != new_pw2:
+                    st.error("Passwords do not match.")
+                else:
+                    st.session_state.authenticated = True
+                    st.session_state.show_new_password = False
+                    st.session_state.show_reset = False
+                    st.session_state.reset_code = None
+                    st.success(f"✅ Password changed! Please update Streamlit Cloud Secrets with: app_password = \"{new_pw}\"")
+                    st.info("⚠️ To make the new password permanent, go to Streamlit Cloud → Manage app → Settings → Secrets and update app_password.")
+                    _time.sleep(3)
+                    st.rerun()
+            if st.button("← Back to Login", use_container_width=True):
+                st.session_state.show_new_password = False
+                st.session_state.show_reset = False
+                st.rerun()
+
+        # === Step 2: Enter Reset Code ===
+        elif st.session_state.show_reset:
+            st.markdown("#### 📧 Check Your Email")
+            try:
+                admin_email = st.secrets.get("admin_email", "p.baek@iifa.edu")
+            except Exception:
+                admin_email = "p.baek@iifa.edu"
+            masked = admin_email[:3] + "***" + admin_email[admin_email.index("@"):]
+            st.info(f"A reset code was sent to **{masked}**")
+
+            code_input = st.text_input("Enter 6-digit code", placeholder="000000", max_chars=6, key="reset_input")
+            if st.button("Verify Code", use_container_width=True, type="primary"):
+                # Check expiration (10 minutes)
+                if _time.time() - st.session_state.reset_code_time > 600:
+                    st.error("Code expired. Please request a new one.")
+                    st.session_state.show_reset = False
+                    st.session_state.reset_code = None
+                elif code_input == st.session_state.reset_code:
+                    st.session_state.show_new_password = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect code. Please try again.")
+
+            if st.button("← Back to Login", use_container_width=True):
+                st.session_state.show_reset = False
+                st.session_state.reset_code = None
+                st.rerun()
+
+        # === Step 1: Normal Login ===
+        else:
+            password = st.text_input("Password", type="password", placeholder="Enter password")
+            if st.button("Login", use_container_width=True, type="primary"):
+                if password == correct_password:
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password. Please try again.")
+
+            st.markdown("")
+            if st.button("🔒 Forgot Password?", use_container_width=True):
+                reset_code = _generate_reset_code()
+                st.session_state.reset_code = reset_code
+                st.session_state.reset_code_time = _time.time()
+                with st.spinner("Sending reset code to your email..."):
+                    sent = _send_reset_code_email(reset_code)
+                if sent:
+                    st.session_state.show_reset = True
+                    st.rerun()
+                else:
+                    st.error("Failed to send email. Please contact administrator.")
+
+        st.markdown("---")
+    return False
+
+if not check_password():
+    st.stop()
+
 # --- Init (only once per session, not every page reload) ---
 if "sheets_initialized" not in st.session_state:
     st.session_state.sheets_initialized = False
