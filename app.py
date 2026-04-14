@@ -1061,7 +1061,7 @@ elif page.startswith("🧾"):  # Invoice & Email
                 for j, c in enumerate(row_clients):
                     email_status = "✅" if c["email"] else "❌"
                     label = f"{c['name']} ({c['visa_type'] or '-'}) {email_status}"
-                    checked = cols[j].checkbox(label, value=select_all, key=f"bsel_{c['id']}")
+                    checked = cols[j].checkbox(label, value=select_all, key=f"bsel_{i+j}_{c['id']}")
                     if checked:
                         selected_clients.append(c)
 
