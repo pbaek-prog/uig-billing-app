@@ -1,6 +1,5 @@
 [server]
 headless = true
-port = 8510
 enableCORS = false
 
 [theme]
