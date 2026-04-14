@@ -13,6 +13,8 @@ client_secret*.json
 # === Generated Files ===
 generated_invoices/
 backups/
+drive_folder_ids.json
+setup_drive_folders.py
 
 # === Python ===
 __pycache__/

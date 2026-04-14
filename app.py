@@ -1,7 +1,8 @@
 """
-US Immigration Group - Legal Billing System v2.0
+US Immigration Group - Legal Billing System v3.0
 800 E. Northwest Hwy. Ste 205, Mount Prospect, IL 60016
 Full-featured billing with Google Sheets database + Google Drive file storage.
++ USCIS Tracker, PACER/ECF, Client Portal, Multi-language support.
 """
 import streamlit as st
 import pandas as pd
@@ -11,6 +12,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
+
+# --- i18n (Multi-language) ---
+from i18n import t, get_available_languages, LANGUAGE_NAMES
 
 # --- Google Sheets Database (primary) with SQLite fallback ---
 try:
@@ -70,6 +74,35 @@ from gmail_api_service import (
     create_gmail_draft, authorize_gmail
 )
 from config import FIRM_NAME, FIRM_ADDRESS, FIRM_CITY_STATE, FIRM_PHONE, FIRM_EMAIL, SPREADSHEET_ID
+
+# --- New modules: USCIS, PACER, Client Portal ---
+try:
+    from uscis_tracker import (
+        check_case_status, check_multiple_cases, get_status_color,
+        get_status_emoji, save_case_to_sheets, get_all_tracked_cases,
+    )
+    HAS_USCIS = True
+except ImportError:
+    HAS_USCIS = False
+
+try:
+    from pacer_tracker import (
+        FEDERAL_DISTRICTS, FILING_TYPES, PACER_URLS,
+        get_pacer_url, get_auto_deadlines, FEDERAL_DEADLINES,
+        save_court_case, get_all_court_cases,
+    )
+    HAS_PACER = True
+except ImportError:
+    HAS_PACER = False
+
+try:
+    from client_portal import (
+        create_portal_access, verify_portal_access,
+        get_client_invoices, get_client_payments, get_client_deadlines,
+    )
+    HAS_PORTAL = True
+except ImportError:
+    HAS_PORTAL = False
 
 # --- Page Config ---
 st.set_page_config(
@@ -145,6 +178,10 @@ def check_password():
     """Returns True if the user has entered the correct password. Includes reset via email."""
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+    if "portal_authenticated" not in st.session_state:
+        st.session_state.portal_authenticated = False
+    if "portal_client" not in st.session_state:
+        st.session_state.portal_client = None
     if "show_reset" not in st.session_state:
         st.session_state.show_reset = False
     if "show_new_password" not in st.session_state:
@@ -254,9 +291,123 @@ def check_password():
                     st.error("Failed to send email. Please contact administrator.")
 
         st.markdown("---")
+
+        # --- Client Portal Login ---
+        if HAS_PORTAL:
+            with st.expander("🌐 Client Portal Login"):
+                portal_code = st.text_input("Access Code", placeholder="Enter your access code",
+                                           key="portal_code_input", type="password")
+                if st.button("Enter Portal", use_container_width=True, key="portal_login_btn"):
+                    if portal_code:
+                        try:
+                            from google_sheets_db import get_credentials
+                            from googleapiclient.discovery import build
+                            creds = get_credentials()
+                            if creds:
+                                sheets_svc = build('sheets', 'v4', credentials=creds)
+                                client_info = verify_portal_access(
+                                    portal_code, sheets_svc, SPREADSHEET_ID
+                                )
+                                if client_info:
+                                    st.session_state.portal_authenticated = True
+                                    st.session_state.portal_client = client_info
+                                    st.session_state.authenticated = True
+                                    st.rerun()
+                                else:
+                                    st.error("Invalid access code. Please try again.")
+                            else:
+                                st.error("System not configured. Contact your attorney.")
+                        except Exception as e:
+                            st.error("Portal temporarily unavailable. Contact your attorney.")
+                    else:
+                        st.warning("Please enter your access code.")
+
     return False
 
 if not check_password():
+    st.stop()
+
+# --- Client Portal View (restricted) ---
+if st.session_state.get("portal_authenticated") and st.session_state.get("portal_client"):
+    _portal_client = st.session_state.portal_client
+    _portal_lang = _portal_client.get("language", "en")
+
+    st.markdown(f"""
+    <div class="gold-banner">
+        <h2 style="margin:0;">🌐 Client Portal</h2>
+        <p style="margin:5px 0 0;">Welcome, {_portal_client.get('client_name', 'Client')}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
+        st.session_state.portal_authenticated = False
+        st.session_state.portal_client = None
+        st.session_state.authenticated = False
+        st.rerun()
+
+    _client_id = _portal_client.get("client_id", "")
+
+    try:
+        from google_sheets_db import get_credentials
+        from googleapiclient.discovery import build
+        _creds = get_credentials()
+        _sheets_svc = build('sheets', 'v4', credentials=_creds) if _creds else None
+    except Exception:
+        _sheets_svc = None
+
+    portal_tab1, portal_tab2, portal_tab3 = st.tabs(["📄 Invoices", "💰 Payments", "📅 Deadlines"])
+
+    with portal_tab1:
+        st.subheader("Your Invoices")
+        invoices = get_client_invoices(_client_id, _sheets_svc, SPREADSHEET_ID) if _sheets_svc else []
+        if invoices:
+            for inv in invoices:
+                status_color = "#28a745" if inv["status"].lower() == "paid" else "#dc3545"
+                st.markdown(f"""
+                <div style="background:#f8f9fa; padding:12px; border-radius:8px; margin:8px 0;
+                            border-left:4px solid {status_color};">
+                    <strong>{inv['invoice_number']}</strong> — ${float(inv.get('amount', 0)):,.2f}<br>
+                    <span style="color:#666;">Due: {inv['due_date']}</span> |
+                    <span style="color:{status_color}; font-weight:bold;">{inv['status']}</span><br>
+                    <span style="color:#999;">{inv.get('description', '')}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No invoices found.")
+
+    with portal_tab2:
+        st.subheader("Your Payments")
+        payments = get_client_payments(_client_id, _sheets_svc, SPREADSHEET_ID) if _sheets_svc else []
+        if payments:
+            for pmt in payments:
+                st.markdown(f"""
+                <div style="background:#e0ffe0; padding:12px; border-radius:8px; margin:8px 0;
+                            border-left:4px solid #28a745;">
+                    <strong>${float(pmt.get('amount', 0)):,.2f}</strong> — {pmt['date']}<br>
+                    <span style="color:#666;">Method: {pmt.get('method', 'N/A')} | Ref: {pmt.get('reference', 'N/A')}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No payments recorded.")
+
+    with portal_tab3:
+        st.subheader("Upcoming Deadlines")
+        deadlines = get_client_deadlines(_client_id, _sheets_svc, SPREADSHEET_ID) if _sheets_svc else []
+        if deadlines:
+            for dl in deadlines:
+                st.markdown(f"""
+                <div style="background:#fff8e0; padding:12px; border-radius:8px; margin:8px 0;
+                            border-left:4px solid #F5A623;">
+                    <strong>📅 {dl['date']}</strong><br>
+                    {dl.get('description', '')}
+                    <span style="color:#999;"> ({dl.get('category', '')})</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No upcoming deadlines.")
+
+    st.markdown("---")
+    st.caption("US Immigration Group | (847) 449-8660 | 800 E. Northwest Hwy. Ste 205, Mount Prospect, IL 60016")
     st.stop()
 
 # --- Init (only once per session, not every page reload) ---
@@ -318,20 +469,36 @@ st.sidebar.markdown("**800 E. Northwest Hwy. Ste 205**")
 st.sidebar.markdown("Mount Prospect, IL 60016")
 st.sidebar.divider()
 
+# Language selector
+if "app_lang" not in st.session_state:
+    st.session_state.app_lang = "en"
+lang_col1, lang_col2 = st.sidebar.columns([3, 1])
+with lang_col2:
+    lang_options = list(LANGUAGE_NAMES.keys())
+    lang_labels = list(LANGUAGE_NAMES.values())
+    lang_idx = lang_options.index(st.session_state.app_lang) if st.session_state.app_lang in lang_options else 0
+    selected_lang = st.selectbox("🌐", lang_labels, index=lang_idx, key="lang_select", label_visibility="collapsed")
+    st.session_state.app_lang = lang_options[lang_labels.index(selected_lang)]
+
+_lang = st.session_state.app_lang
+
 page = st.sidebar.radio(
     "Navigation",
-    ["📊 Dashboard",
-     "🧾 Invoice & Email",
-     "⚠️ Past Due & Alerts",
-     "💰 Payment Tracking",
-     "🏦 Trust Account (IOLTA)",
-     "📁 Expenses",
-     "👥 Clients & Cases",
-     "📈 Reports & P&L",
-     "📜 Audit Log",
-     "💾 Backup & Export",
-     "🤖 AI Assistant",
-     "⚙️ Gmail Setup"],
+    ["📊 " + t("nav_dashboard", _lang),
+     "🧾 " + t("nav_invoice", _lang),
+     "⚠️ " + t("nav_past_due", _lang),
+     "💰 " + t("nav_payment", _lang),
+     "🏦 " + t("nav_trust", _lang),
+     "📁 " + t("nav_expenses", _lang),
+     "👥 " + t("nav_clients", _lang),
+     "📈 " + t("nav_reports", _lang),
+     "📜 " + t("nav_audit", _lang),
+     "💾 " + t("nav_backup", _lang),
+     "🔍 " + t("nav_uscis", _lang),
+     "⚖️ " + t("nav_court", _lang),
+     "🌐 " + t("nav_portal", _lang),
+     "🤖 " + t("nav_ai", _lang),
+     "⚙️ " + t("nav_gmail", _lang)],
     index=0
 )
 
@@ -357,7 +524,7 @@ with st.sidebar.expander("⚙️ Email Settings"):
 
 st.sidebar.divider()
 st.sidebar.caption("US Immigration Group")
-st.sidebar.caption("v2.0 | April 2026")
+st.sidebar.caption("v3.0 | April 2026")
 
 
 def send_or_preview_email(recipient, subject, body, attachment_path=None,
@@ -391,7 +558,7 @@ def send_or_preview_email(recipient, subject, body, attachment_path=None,
 # ==============================
 # DASHBOARD
 # ==============================
-if page == "📊 Dashboard":
+if page.startswith("📊"):  # Dashboard
     hdr_left, hdr_right = st.columns([5, 1])
     with hdr_left:
         st.markdown('<p class="main-header">Dashboard</p>', unsafe_allow_html=True)
@@ -524,7 +691,7 @@ if page == "📊 Dashboard":
 # ==============================
 # INVOICE & EMAIL
 # ==============================
-elif page == "🧾 Invoice & Email":
+elif page.startswith("🧾"):  # Invoice & Email
     st.markdown('<p class="main-header">Invoice Generation & Email</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Generate legal invoices and send via email</p>', unsafe_allow_html=True)
     st.divider()
@@ -715,7 +882,7 @@ elif page == "🧾 Invoice & Email":
 # ==============================
 # PAST DUE & ALERTS
 # ==============================
-elif page == "⚠️ Past Due & Alerts":
+elif page.startswith("⚠️"):  # Past Due & Alerts
     st.markdown('<p class="main-header">Past Due & Case Alerts</p>', unsafe_allow_html=True)
     st.divider()
 
@@ -848,7 +1015,7 @@ elif page == "⚠️ Past Due & Alerts":
 # ==============================
 # PAYMENT TRACKING
 # ==============================
-elif page == "💰 Payment Tracking":
+elif page.startswith("💰"):  # Payment Tracking
     st.markdown('<p class="main-header">Payment Tracking</p>', unsafe_allow_html=True)
     st.divider()
 
@@ -921,7 +1088,7 @@ elif page == "💰 Payment Tracking":
 # ==============================
 # TRUST ACCOUNT (IOLTA)
 # ==============================
-elif page == "🏦 Trust Account (IOLTA)":
+elif page.startswith("🏦"):  # Trust Account (IOLTA)
     st.markdown('<p class="main-header">Trust Account (IOLTA)</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Client trust fund management — IRPC Rule 1.15 compliant</p>', unsafe_allow_html=True)
     st.divider()
@@ -1000,7 +1167,7 @@ elif page == "🏦 Trust Account (IOLTA)":
 # ==============================
 # EXPENSES
 # ==============================
-elif page == "📁 Expenses":
+elif page.startswith("📁"):  # Expenses
     st.markdown('<p class="main-header">Expense Management</p>', unsafe_allow_html=True)
     st.divider()
 
@@ -1070,7 +1237,7 @@ elif page == "📁 Expenses":
 # ==============================
 # CLIENTS & CASES
 # ==============================
-elif page == "👥 Clients & Cases":
+elif page.startswith("👥"):  # Clients & Cases
     st.markdown('<p class="main-header">Client & Case Management</p>', unsafe_allow_html=True)
     st.divider()
 
@@ -1163,7 +1330,7 @@ elif page == "👥 Clients & Cases":
 # ==============================
 # REPORTS & P&L
 # ==============================
-elif page == "📈 Reports & P&L":
+elif page.startswith("📈"):  # Reports & P&L
     st.markdown('<p class="main-header">Reports & P&L</p>', unsafe_allow_html=True)
     st.divider()
 
@@ -1248,7 +1415,7 @@ elif page == "📈 Reports & P&L":
 # AI ASSISTANT
 # ==============================
 
-elif page == "📜 Audit Log":
+elif page.startswith("📜"):  # Audit Log
     st.markdown('<p class="main-header">Audit Log</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">System activity tracking for compliance</p>', unsafe_allow_html=True)
     st.divider()
@@ -1290,7 +1457,7 @@ elif page == "📜 Audit Log":
             st.info("No audit log entries found.")
 
 
-elif page == "💾 Backup & Export":
+elif page.startswith("💾"):  # Backup & Export
     st.markdown('<p class="main-header">Backup & Export</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Export data and manage backups</p>', unsafe_allow_html=True)
     st.divider()
@@ -1362,7 +1529,7 @@ elif page == "💾 Backup & Export":
             st.success("✅ All client balances recalculated!")
             invalidate_all_caches()
 
-elif page == "🤖 AI Assistant":
+elif page.startswith("🤖"):  # AI Assistant
     st.markdown('<p class="main-header">AI Assistant & Integration Status</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Google Workspace + Claude Cowork AI Agent Integration Status</p>', unsafe_allow_html=True)
     st.divider()
@@ -1459,9 +1626,292 @@ elif page == "🤖 AI Assistant":
 
 
 # ==============================
+# USCIS CASE TRACKER
+# ==============================
+elif page.startswith("🔍"):  # USCIS Tracker
+    st.markdown(f'<p class="main-header">🔍 {t("uscis_title", _lang)}</p>', unsafe_allow_html=True)
+    st.divider()
+
+    if HAS_USCIS:
+        tab_check, tab_tracked = st.tabs(["🔍 Check Status", "📋 Tracked Cases"])
+
+        with tab_check:
+            st.subheader("Check USCIS Case Status")
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                receipt_input = st.text_input(t("receipt_number", _lang),
+                    placeholder="EAC2190012345 (3 letters + 10 digits)", key="uscis_receipt")
+            with col2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                check_btn = st.button(t("check_status", _lang), type="primary", use_container_width=True)
+
+            if check_btn and receipt_input:
+                with st.spinner("Checking USCIS..."):
+                    result = check_case_status(receipt_input)
+                if result.get("success"):
+                    emoji = get_status_emoji(result["category"])
+                    color = get_status_color(result["category"])
+                    st.markdown(f"""
+                    <div style="border-left:5px solid {color}; padding:15px; background:#f8f9fa; border-radius:5px; margin:10px 0;">
+                        <h3>{emoji} {result['status_title']}</h3>
+                        <p><b>Receipt:</b> {result['receipt_number']}</p>
+                        <p>{result['status_description'][:300]}</p>
+                        <p style="color:#999; font-size:12px;">Checked: {result['checked_at'][:19]}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Save to tracked cases
+                    with st.expander("Save to Tracked Cases"):
+                        save_client = st.text_input("Client Name", key="uscis_save_client")
+                        save_type = st.selectbox("Case Type", ["I-130", "I-140", "I-485", "I-751",
+                            "N-400", "I-765", "I-131", "I-129", "I-539", "Other"], key="uscis_save_type")
+                        if st.button("Save Case", key="uscis_save_btn"):
+                            if USE_GOOGLE_SHEETS:
+                                try:
+                                    from google_sheets_db import get_sheets_service
+                                    svc = get_sheets_service()
+                                    case_data = {**result, "client_name": save_client, "case_type": save_type}
+                                    save_case_to_sheets(case_data, svc, SPREADSHEET_ID)
+                                    st.success("Case saved to tracker!")
+                                except Exception as e:
+                                    st.error(f"Save failed: {e}")
+                else:
+                    st.error(result.get("error", "Unknown error"))
+
+            # Batch check
+            st.divider()
+            st.subheader("Batch Check Multiple Cases")
+            batch_input = st.text_area("Enter receipt numbers (one per line)", height=100, key="uscis_batch")
+            if st.button("Check All", key="uscis_batch_btn"):
+                numbers = [n.strip() for n in batch_input.split("\n") if n.strip()]
+                if numbers:
+                    with st.spinner(f"Checking {len(numbers)} cases..."):
+                        results = check_multiple_cases(numbers)
+                    for r in results:
+                        if r.get("success"):
+                            emoji = get_status_emoji(r["category"])
+                            st.write(f"{emoji} **{r['receipt_number']}**: {r['status_title']}")
+                        else:
+                            st.write(f"❓ **{r.get('receipt_number', '?')}**: {r.get('error', 'Error')}")
+
+        with tab_tracked:
+            st.subheader("Tracked USCIS Cases")
+            if USE_GOOGLE_SHEETS:
+                try:
+                    from google_sheets_db import get_sheets_service
+                    svc = get_sheets_service()
+                    cases = get_all_tracked_cases(svc, SPREADSHEET_ID)
+                    if cases:
+                        df = pd.DataFrame(cases)
+                        st.dataframe(df, use_container_width=True)
+                        if st.button("🔄 Refresh All Statuses", key="uscis_refresh_all"):
+                            with st.spinner("Refreshing..."):
+                                for case in cases:
+                                    rn = case.get("receipt_number", "")
+                                    if rn:
+                                        result = check_case_status(rn)
+                                        if result.get("success"):
+                                            case.update(result)
+                                            save_case_to_sheets(case, svc, SPREADSHEET_ID)
+                            st.success("All cases refreshed!")
+                            st.rerun()
+                    else:
+                        st.info("No tracked cases yet. Use 'Check Status' tab to add cases.")
+                except Exception as e:
+                    st.error(f"Error loading cases: {e}")
+    else:
+        st.warning("USCIS Tracker module not available.")
+
+
+# ==============================
+# COURT CASES & e-FILING
+# ==============================
+elif page.startswith("⚖️"):  # Court Cases
+    st.markdown(f'<p class="main-header">⚖️ {t("court_title", _lang)}</p>', unsafe_allow_html=True)
+    st.divider()
+
+    if HAS_PACER:
+        tab_cases, tab_add, tab_deadlines = st.tabs(["📋 Court Cases", "➕ Add Case", "⏰ Deadlines Calculator"])
+
+        with tab_cases:
+            st.subheader("Active Court Cases")
+            if USE_GOOGLE_SHEETS:
+                try:
+                    from google_sheets_db import get_sheets_service
+                    svc = get_sheets_service()
+                    cases = get_all_court_cases(svc, SPREADSHEET_ID)
+                    if cases:
+                        df = pd.DataFrame(cases)
+                        st.dataframe(df, use_container_width=True)
+                    else:
+                        st.info("No court cases added yet.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+            st.divider()
+            st.subheader("PACER Quick Links")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"[🔗 PACER Login]({PACER_URLS['login']})")
+                st.markdown(f"[🔗 Case Search]({PACER_URLS['case_search']})")
+            with col2:
+                st.markdown(f"[🔗 N.D. Illinois ECF]({PACER_URLS['ILND']})")
+                st.markdown(f"[🔗 C.D. Illinois ECF]({PACER_URLS['ILCD']})")
+            with col3:
+                st.markdown(f"[🔗 7th Circuit ECF]({PACER_URLS['7CIR']})")
+                st.markdown(f"[🔗 S.D. Illinois ECF]({PACER_URLS['ILSD']})")
+
+        with tab_add:
+            st.subheader("Add New Court Case")
+            with st.form("add_court_case"):
+                cc_number = st.text_input("Case Number", placeholder="1:24-cv-01234")
+                cc_name = st.text_input("Case Name", placeholder="Doe v. USCIS")
+                cc_district = st.selectbox("Court/District", list(FEDERAL_DISTRICTS.keys()),
+                    format_func=lambda x: f"{x} - {FEDERAL_DISTRICTS[x]}")
+                cc_judge = st.text_input("Judge", placeholder="Hon. John Smith")
+                cc_client = st.text_input("Client Name")
+                cc_type = st.selectbox("Case Type", ["Immigration", "Civil", "Criminal", "Appellate", "Other"])
+                cc_filed = st.date_input("Filed Date")
+                cc_notes = st.text_area("Notes", height=80)
+                cc_submit = st.form_submit_button("Add Case", type="primary")
+
+            if cc_submit and cc_number and cc_name:
+                if USE_GOOGLE_SHEETS:
+                    try:
+                        from google_sheets_db import get_sheets_service
+                        svc = get_sheets_service()
+                        case_data = {
+                            "case_number": cc_number, "case_name": cc_name,
+                            "court": FEDERAL_DISTRICTS.get(cc_district, cc_district),
+                            "district": cc_district, "judge": cc_judge,
+                            "client_name": cc_client, "case_type": cc_type,
+                            "filed_date": str(cc_filed), "notes": cc_notes,
+                        }
+                        save_court_case(case_data, svc, SPREADSHEET_ID)
+                        st.success(f"Court case {cc_number} added!")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        with tab_deadlines:
+            st.subheader("Federal Deadline Calculator")
+            event_type = st.selectbox("Event Type", [
+                "Complaint Filed", "Motion Filed Against", "Response Filed",
+                "Order/Judgment Entered", "Discovery Request Received", "Immigration Order"
+            ])
+            event_date = st.date_input("Event Date", value=date.today())
+            if st.button("Calculate Deadlines", type="primary"):
+                deadlines = get_auto_deadlines(event_type, str(event_date))
+                if deadlines:
+                    for dl in deadlines:
+                        priority_color = {"critical": "🔴", "high": "🟡", "medium": "🔵"}.get(dl["priority"], "⚪")
+                        st.write(f"{priority_color} **{dl['name']}**: {dl['date'].strftime('%B %d, %Y') if dl['date'] else 'N/A'}")
+                else:
+                    st.info("No automatic deadlines for this event type.")
+
+            st.divider()
+            st.subheader("Common Federal Court Deadlines Reference")
+            for name, info in FEDERAL_DEADLINES.items():
+                st.write(f"- **{name}**: {info['days']} days")
+    else:
+        st.warning("PACER module not available.")
+
+
+# ==============================
+# CLIENT PORTAL MANAGEMENT
+# ==============================
+elif page.startswith("🌐"):  # Client Portal
+    st.markdown(f'<p class="main-header">🌐 {t("portal_title", _lang)}</p>', unsafe_allow_html=True)
+    st.divider()
+
+    if HAS_PORTAL and USE_GOOGLE_SHEETS:
+        tab_manage, tab_preview = st.tabs(["👤 Manage Access", "👁️ Portal Preview"])
+
+        with tab_manage:
+            st.subheader("Generate Client Portal Access")
+            st.write("Create a unique access code for a client to view their case status, invoices, and documents online.")
+
+            clients = get_all_clients()
+            if clients:
+                client_opts = {f"{c['name']} ({c['case_number'] or '-'})": c for c in clients}
+                sel_key = st.selectbox("Select Client", list(client_opts.keys()), key="portal_client")
+                sel_c = client_opts[sel_key]
+
+                portal_email = st.text_input("Client Email", value=sel_c.get("email", ""), key="portal_email")
+
+                if st.button("🔑 Generate Access Code", type="primary", key="portal_gen"):
+                    try:
+                        from google_sheets_db import get_sheets_service
+                        svc = get_sheets_service()
+                        code = create_portal_access(
+                            sel_c["id"], sel_c["name"], portal_email, svc, SPREADSHEET_ID
+                        )
+                        st.success(f"Access code generated!")
+                        st.code(code, language=None)
+                        st.warning("⚠️ Save this code now! It cannot be retrieved later.")
+
+                        portal_url = "uig-billing-app-3bny6mhputkk7iakddvae9.streamlit.app"
+                        st.info(f"""
+                        **Send to client:**
+                        - Portal URL: {portal_url}
+                        - Access Code: {code}
+                        - Click "Client Portal Login" on the login page
+                        """)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            else:
+                st.info("No clients found. Add clients first.")
+
+        with tab_preview:
+            st.subheader("Preview Client Portal View")
+            st.write("See what clients will see when they log into the portal.")
+            clients = get_all_clients()
+            if clients:
+                client_opts2 = {f"{c['name']}": c for c in clients}
+                sel_key2 = st.selectbox("Preview as", list(client_opts2.keys()), key="portal_preview_client")
+                sel_c2 = client_opts2[sel_key2]
+
+                if st.button("Show Preview", key="portal_preview_btn"):
+                    try:
+                        from google_sheets_db import get_sheets_service
+                        svc = get_sheets_service()
+
+                        st.markdown(f"### Welcome, {sel_c2['name']}")
+                        st.markdown("---")
+
+                        # Invoices
+                        invoices = get_client_invoices(sel_c2["id"], svc, SPREADSHEET_ID)
+                        st.subheader("📄 Your Invoices")
+                        if invoices:
+                            st.dataframe(pd.DataFrame(invoices), use_container_width=True)
+                        else:
+                            st.info("No invoices found.")
+
+                        # Payments
+                        payments = get_client_payments(sel_c2["id"], svc, SPREADSHEET_ID)
+                        st.subheader("💳 Your Payments")
+                        if payments:
+                            st.dataframe(pd.DataFrame(payments), use_container_width=True)
+                        else:
+                            st.info("No payments found.")
+
+                        # Deadlines
+                        deadlines = get_client_deadlines(sel_c2["id"], svc, SPREADSHEET_ID)
+                        st.subheader("📅 Upcoming Deadlines")
+                        if deadlines:
+                            for dl in deadlines:
+                                st.write(f"- **{dl['date']}**: {dl['description']}")
+                        else:
+                            st.info("No upcoming deadlines.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+    else:
+        st.warning("Client Portal module requires Google Sheets connection.")
+
+
+# ==============================
 # GOOGLE WORKSPACE SETUP
 # ==============================
-elif page == "⚙️ Gmail Setup":
+elif page.startswith("⚙️"):  # Gmail Setup
     st.markdown('<p class="main-header">Google Workspace Setup</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Gmail + Google Sheets + Google Drive Setup</p>', unsafe_allow_html=True)
     st.divider()
