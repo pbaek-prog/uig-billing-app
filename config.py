@@ -69,8 +69,11 @@ NAVY = "#1A3C5E"
 # === OAuth Scopes (Gmail + Sheets + Drive) ===
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.events",
 ]
 
 # === Credentials paths ===

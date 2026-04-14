@@ -760,6 +760,8 @@ page = st.sidebar.radio(
      "🔍 " + t("nav_uscis", _lang),
      "⚖️ " + t("nav_court", _lang),
      "🌐 " + t("nav_portal", _lang),
+     "🗓️ Calendar Sync",
+     "✍️ e-Signature",
      "🤖 " + t("nav_ai", _lang),
      "⚙️ " + t("nav_gmail", _lang)],
     index=0
@@ -2169,6 +2171,226 @@ elif page.startswith("🌐"):  # Client Portal
                         st.error(f"Error: {e}")
     else:
         st.warning("Client Portal module requires Google Sheets connection.")
+
+
+# ==============================
+# CALENDAR SYNC
+# ==============================
+elif page.startswith("🗓️"):  # Calendar Sync
+    st.markdown('<p class="main-header">🗓️ Google Calendar Sync</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">데드라인 및 법정 기일을 Google Calendar에 자동 동기화</p>', unsafe_allow_html=True)
+    st.divider()
+
+    try:
+        import calendar_sync as cs
+    except Exception as e:
+        st.error(f"calendar_sync 모듈 로드 실패: {e}")
+        cs = None
+
+    st.info(
+        "⚠️ **최초 사용 시 OAuth 재인증 필요**: Calendar 접근 권한이 추가되었습니다. "
+        "Google Workspace Setup 페이지에서 재인증하세요."
+    )
+
+    if cs and USE_GOOGLE_SHEETS:
+        try:
+            from google_sheets_db import get_sheets_service, get_credentials
+            svc = get_sheets_service()
+            creds = get_credentials()
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📋 사용 가능한 캘린더 목록 조회"):
+                    cals = cs.list_calendars(creds)
+                    if cals:
+                        for c in cals:
+                            marker = " ⭐" if c.get("primary") else ""
+                            st.write(f"- **{c['summary']}**{marker} (`{c['id']}`)")
+                    else:
+                        st.warning("캘린더 목록을 가져올 수 없습니다. OAuth scope를 확인하세요.")
+
+            with col2:
+                calendar_id_input = st.text_input(
+                    "대상 Calendar ID",
+                    value="primary",
+                    help="기본값 'primary'는 주 캘린더"
+                )
+
+            st.divider()
+            st.subheader("데드라인 일괄 동기화")
+
+            if st.button("🔄 미동기화 데드라인 모두 캘린더에 추가", type="primary"):
+                cs.ensure_calendar_event_id_column(svc, SPREADSHEET_ID)
+                with st.spinner("동기화 중..."):
+                    result = cs.sync_all_pending_deadlines(
+                        credentials=creds,
+                        sheets_service=svc,
+                        spreadsheet_id=SPREADSHEET_ID,
+                        calendar_id=calendar_id_input,
+                    )
+                st.success(
+                    f"✅ 동기화 완료 — 추가: {result.get('synced', 0)}건, "
+                    f"건너뜀: {result.get('skipped', 0)}건, 실패: {result.get('failed', 0)}건"
+                )
+                if result.get("errors"):
+                    with st.expander("오류 상세"):
+                        for err in result["errors"]:
+                            st.text(err)
+
+            st.divider()
+            st.subheader("개별 이벤트 수동 추가")
+
+            with st.form("manual_calendar_event"):
+                ev_title = st.text_input("이벤트 제목*", placeholder="USCIS Interview")
+                ev_date = st.date_input("날짜*", value=date.today())
+                ev_client = st.text_input("클라이언트 이름")
+                ev_case = st.text_input("케이스 번호")
+                ev_location = st.text_input("장소", placeholder="USCIS Chicago Field Office")
+                ev_desc = st.text_area("상세 설명", height=80)
+                ev_submit = st.form_submit_button("캘린더에 추가", type="primary")
+
+            if ev_submit and ev_title:
+                res = cs.create_calendar_event(
+                    credentials=creds,
+                    title=ev_title,
+                    event_date=ev_date,
+                    description=ev_desc,
+                    client_name=ev_client,
+                    case_number=ev_case,
+                    location=ev_location,
+                    calendar_id=calendar_id_input,
+                )
+                if res.get("success"):
+                    st.success(f"✅ 이벤트 생성 완료")
+                    if res.get("html_link"):
+                        st.markdown(f"[📅 캘린더에서 보기]({res['html_link']})")
+                else:
+                    st.error(f"실패: {res.get('error')}")
+
+        except Exception as e:
+            st.error(f"Calendar Sync 초기화 오류: {e}")
+            st.info("Google Workspace Setup 페이지에서 재인증이 필요할 수 있습니다.")
+    else:
+        st.warning("Google Sheets 연결이 필요합니다.")
+
+
+# ==============================
+# E-SIGNATURE
+# ==============================
+elif page.startswith("✍️"):  # e-Signature
+    st.markdown('<p class="main-header">✍️ e-Signature</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">전자서명 요청 발송 및 관리</p>', unsafe_allow_html=True)
+    st.divider()
+
+    try:
+        import esignature as esig
+    except Exception as e:
+        st.error(f"esignature 모듈 로드 실패: {e}")
+        esig = None
+
+    if esig and USE_GOOGLE_SHEETS:
+        try:
+            from google_sheets_db import get_sheets_service, get_drive_service
+            svc = get_sheets_service()
+            drive_svc = get_drive_service()
+            esig.ensure_signature_sheet(svc, SPREADSHEET_ID)
+
+            tab_new, tab_pending, tab_sign = st.tabs([
+                "📤 서명 요청 생성", "⏳ 대기 중 요청", "✍️ 직접 서명 (변호사용)"
+            ])
+
+            with tab_new:
+                st.subheader("클라이언트에게 서명 요청 보내기")
+                with st.form("new_signature_request"):
+                    sr_client_id = st.text_input("클라이언트 ID*", placeholder="CLIENT-2026-001")
+                    sr_client_name = st.text_input("클라이언트 이름*")
+                    sr_doc_name = st.text_input("문서 이름*", placeholder="수임계약서.pdf")
+                    sr_doc_id = st.text_input("Drive 파일 ID*", help="서명받을 PDF의 Google Drive file ID")
+                    sr_notes = st.text_area("메모", height=60)
+                    sr_submit = st.form_submit_button("서명 요청 생성", type="primary")
+
+                if sr_submit and sr_client_id and sr_client_name and sr_doc_id:
+                    try:
+                        req_id = esig.create_signature_request(
+                            sheets_service=svc,
+                            spreadsheet_id=SPREADSHEET_ID,
+                            client_name=sr_client_name,
+                            client_id=sr_client_id,
+                            document_name=sr_doc_name,
+                            document_drive_id=sr_doc_id,
+                            requested_by=st.session_state.get("username", "admin"),
+                            notes=sr_notes,
+                        )
+                        st.success(f"✅ 서명 요청 생성 완료: `{req_id}`")
+                        st.info("클라이언트는 Client Portal 로그인 후 '서명' 탭에서 확인할 수 있습니다.")
+                    except Exception as e:
+                        st.error(f"오류: {e}")
+
+            with tab_pending:
+                st.subheader("대기 중인 서명 요청")
+                pending = esig.get_pending_signature_requests(svc, SPREADSHEET_ID)
+                if pending:
+                    df = pd.DataFrame([
+                        {
+                            "Request ID": p.get("Request ID"),
+                            "Client": p.get("Client Name"),
+                            "Document": p.get("Document Name"),
+                            "Created": p.get("Created At", "")[:10],
+                            "Requested By": p.get("Requested By"),
+                        }
+                        for p in pending
+                    ])
+                    st.dataframe(df, use_container_width=True)
+                else:
+                    st.info("대기 중인 서명 요청이 없습니다.")
+
+            with tab_sign:
+                st.subheader("변호사 직접 서명 (PDF에 서명 삽입)")
+                st.caption("PDF 파일을 업로드하고 아래 패드에 서명한 뒤, 서명이 삽입된 PDF를 다운로드합니다.")
+
+                uploaded_pdf = st.file_uploader("PDF 업로드", type=["pdf"], key="sign_pdf_upload")
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    sig_x = st.number_input("X 좌표 (points)", value=100, min_value=0)
+                    sig_y = st.number_input("Y 좌표 (points)", value=100, min_value=0)
+                with col_b:
+                    sig_w = st.number_input("너비 (points)", value=150, min_value=20)
+                    sig_h = st.number_input("높이 (points)", value=50, min_value=10)
+
+                sig_page = st.number_input("페이지 번호 (0=첫 페이지, 비워두면 마지막)", value=-1, min_value=-1)
+                signer_name = st.text_input("서명자 이름", value="US Immigration Group")
+
+                st.write("**아래 영역에 마우스/터치로 서명하세요:**")
+                sig_img = esig.signature_canvas_component(key="admin_sig_pad")
+
+                if uploaded_pdf and sig_img and st.button("🖋️ 서명 삽입 및 PDF 다운로드", type="primary"):
+                    try:
+                        pdf_bytes = uploaded_pdf.read()
+                        sig_png = esig.signature_to_png_bytes(sig_img)
+                        page_arg = None if sig_page == -1 else int(sig_page)
+                        signed = esig.apply_signature_to_pdf(
+                            pdf_bytes=pdf_bytes,
+                            signature_png_bytes=sig_png,
+                            page_num=page_arg,
+                            x=sig_x, y=sig_y,
+                            width=sig_w, height=sig_h,
+                            signer_name=signer_name,
+                        )
+                        st.success("✅ 서명 완료")
+                        st.download_button(
+                            "📥 서명된 PDF 다운로드",
+                            data=signed,
+                            file_name=f"SIGNED_{uploaded_pdf.name}",
+                            mime="application/pdf",
+                        )
+                    except Exception as e:
+                        st.error(f"서명 실패: {e}")
+
+        except Exception as e:
+            st.error(f"e-Signature 초기화 오류: {e}")
+    else:
+        st.warning("Google Sheets 연결이 필요합니다.")
 
 
 # ==============================
